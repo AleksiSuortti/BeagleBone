@@ -1,0 +1,36 @@
+
+*** Reference information for ssd1306.h and .cpp ***
+
+init_sequence, from ssd1306.cpp, SSD1306::initDisplay, explanations for array values:
+
+    0xAE – Display off: Turns the display off initially to prevent it from displaying random pixels during setup.
+
+    0xD5, 0x80 – Display clock divide ratio and oscillator frequency: Sets the internal clock speed for display refresh rate and overall performance. 0x80 is a default value.
+
+    0xA8, 0x3F – Multiplex ratio: Defines the number of display rows. 0x3F is for 64 rows, matching the 128x64 screen.
+
+    0xD3, 0x00 – Display offset: Sets the vertical shift of the display content. 0x00 means no shift.
+
+    0x40 – Display start line: Specifies the starting line (row 0) for displaying pixels.
+
+    0x8D, 0x14 – Charge pump setting: Manages power to the OLED display. 0x14 enables the internal charge pump for powering the display.
+
+    0x20, 0x00 – Memory addressing mode: Sets the memory mode to horizontal, so data is written left-to-right across rows.
+
+    0xA1 – Segment re-map: Reverses the left-to-right mapping of pixels on the display, making the layout consistent for most applications.
+
+    0xC8 – COM output scan direction: Flips the vertical orientation of the rows, setting the display to render top-to-bottom.
+
+    0xDA, 0x12 – COM pins hardware configuration: Adjusts the hardware layout of the display rows and columns. 0x12 is standard for 128x64 displays.
+
+    0x81, 0xCF – Contrast control: Sets the brightness or contrast of the display. 0xCF is a higher contrast value.
+
+    0xD9, 0xF1 – Pre-charge period: Sets the duration of the pre-charge phase for pixel charging, affecting contrast and power use.
+
+    0xDB, 0x40 – VCOMH deselect level: Sets the level for the common voltage on deselected pixels, affecting display stability.
+
+    0xA4 – Disable entire display on: Ensures only pixels with data are lit up (as opposed to lighting the entire screen).
+
+    0xA6 – Normal display mode: Sets the display to show data as normal (0 is black, 1 is white). 0xA7 would invert this.
+
+    0xAF – Display on: Finally, turns the display on so it’s ready to show content.
