@@ -5,7 +5,7 @@
 #include "SSD1306.h"
 
 // Constructor to initialize the i2c bus
-SSD1306::SSD1306(const int bus) : bus(bus), file(-1) {}
+SSD1306::SSD1306(const int bus) : bus(bus), file(-1), cursor{0,0,0} {}
 
 // Destructor to close the file descriptor if open
 SSD1306::~SSD1306() {
@@ -29,12 +29,15 @@ bool SSD1306::begin() {
 
     std::cout << "File opened: " << file << std::endl;
     
+    // Tell i2c driver the file descriptor is used to communicate with the device at I2C_SLAVE_ADDR
     if(ioctl(file, I2C_SLAVE, I2C_SLAVE_ADDR) < 0) {
     	std::cerr << "Failed to open /dev/i2c-" << bus << std::endl;
 	close(file);
     }
 
     initDisplay();
+    clearBuffer();
+    renderDisplay();
     return true;
 }
 
@@ -47,34 +50,49 @@ void SSD1306::initDisplay() {
         SET_DISP_OFFSET, DISP_OFFSET,
         SET_DISP_START_LN,
         SET_CHARGE_PUMP, ENABLE_CH_PUMP,
-        0x20, 0x00,     // Set memory addressing mode to horizontal
-        0xA1,           // Set segment re-map 0 to 127
-        0xC8,           // Set COM output scan direction
-        0xDA, 0x12,     // Set Com pins hardware configuration
-        0x81, 0xCF,     // Set contrast control
-        0xD9, 0xF1,     // Set pre-charge period
-        0xDB, 0x40,     // Set VCOMh Deselect level
-        0xA4,           // Disable entire display on (0xA5 for all on)
-        0xA6,           // Set normal display (0xA7 for inverse)
-        0xAF            // Display on
+        SET_MEM_ADD_MODE, HOR_MEM_ADD_MODE,     // Set memory addressing mode to horizontal
+        SET_SEG_REMAP,           // Set segment re-map 0 to 127
+        SET_COM_OUTPUT_SC_DIR,           // Set COM output scan direction
+        SET_COM_PINS, CONFIG_COM_PINS,     // Set Com pins hardware configuration
+        SET_DISP_CONTRAST, CONTRAST_LEVEL,     // Set contrast control
+        SET_PRE_CH_PRD, CONFIG_PRE_CH_PRD,     // Set pre-charge period
+        SET_PX_TURNOFF_V, PX_TURNOFF_V,     // Set VCOMh Deselect level
+        DISP_FULL_PX_ON,           // Disable entire display on (0xA5 for all on)
+        SET_DISP_NORM,           // Set normal display (0xA7 for inverse)
+        DISP_ON            // Display on
     };
 
-    SSD1306::sendCommand(init_sequence, sizeof(init_sequence));
+    int init_bytes = sendCommand(init_sequence, sizeof(init_sequence));
+
+    if(init_bytes != (sizeof(init_sequence) + 1)) {
+        std::cerr << "Display init failed: (" << init_bytes << ") " << strerror(errno) << " while writing" << std::endl;
+    };
+}
+
+void SSD1306::setDisplayState(bool is_on) {
+    const uint8_t command = is_on ? 0xAF : 0xAE;
+    sendCommand(&command, 1);
+}
+
+void SSD1306::reset() {
+    initDisplay();
+    clearBuffer();
+    renderDisplay();
+}
+
+void SSD1306::clearBuffer() {
+
+    std::memset(frameBuffer, 0x00, sizeof(frameBuffer));
 }
 
 // Clears the display by writing zeroes to all pixels
 void SSD1306::clearDisplay() {
-    uint8_t buffer[1025];   // 1 control byte + 1024 bytes for 128x64 resolution display
-    buffer[0] = 0x40;       // Control byte for data
 
-    std::memset(buffer + 1, 0, 1024);    // Clear screen with zeros
-
-    for(int i = 0; i < 8; i++) {
-        setCursor(0, i);
-        write(file, buffer, 1025);
-    }
+    clearBuffer();
+    renderDisplay();
 }
 
+// This is for debugging use
 void SSD1306::pageTest() {
   
     uint8_t buffer[129];   // control byte + 128 bytes reserved for data
@@ -98,3123 +116,562 @@ void SSD1306::pageTest() {
 }
 
 // Sets the cursor position for the next write operation
-void SSD1306::setCursor(uint8_t col, uint8_t page) {
-    
-    std::cout << "Set cursor to " << (int)page << std::endl;
+int SSD1306::setCursor(uint8_t col, uint8_t page) {
 
         cursor[0] = static_cast<uint8_t>(0xB0 + page);                 // Set page start address
         cursor[1] = static_cast<uint8_t>(0x00 + (col & 0x0F));          // Lower column start address
         cursor[2] = static_cast<uint8_t>(0x10 + ((col >> 4 ) & 0x0F));  // Higher column start addres
     
-    if(write(file, cursor, sizeof(cursor)) < 0) {
-        std::cerr << "Error setting cursor position: " << errno << ": " << strerror(errno) << std::endl;
-    }
+    return write(file, cursor, sizeof(cursor));
 }
 
-void SSD1306::sendCommand(const uint8_t *commands, size_t len) {
+// Send commands to the display
+int SSD1306::sendCommand(const uint8_t *commands, size_t len) {
 
-    uint8_t com_buffer[len + 1]; // +1 for the control byte
+    uint8_t com_buffer[len + 1];                    // +1 for the control byte
 
-    com_buffer[0] = 0x00; // 0x00 is the control byte for commands
+    com_buffer[0] = 0x00;                           // 0x00 is the control byte for commands
 
-    // std::memcpy to copy the commands into the buffer after the control byte
-    std::memcpy(com_buffer + 1, commands, len);
+    std::memcpy(com_buffer + 1, commands, len);     // std::memcpy to copy the commands into the buffer after the control byte
 
-    // Write the nuffer to the i2c bus
-    int debug = write(file, com_buffer, len + 1);
+    int debug = write(file, com_buffer, len + 1);   // Write the buffer to the i2c bus
 
     if(debug != (len + 1)) {
         std::cerr << "Failed to send i2c command:\n" <<
-        debug << " out of " << len + 1 << " bytes written.\n" <<
+        debug << " out of " << len + 1 << " bytes written succesfully.\n" <<
         "Error: (" << errno << ") " << strerror(errno) << std::endl;
+        return errno;
     }
+    return debug;
 }
 
 void SSD1306::drawText(const std::string& text, int x, int y) {
 
     // check if cursor coordinates are valid
-    if((x >= 0 && x <= 127) && (y >= 0 && y <= 63)) {
-        int cursor_x = x;
-        int cursor_y = y;
+    if((x < 0 || x > 127) || (y < 0 || y > 55)) {
+        std::cout << "Cursor index error" << std::endl;
+    }
+    else {
+
+        int x_cursor = x;
 
         for(char c : text){
-            
+            uint8_t charMap[8];    
+            uint8_t* charMapPtr = ASCIImap(c);
+
+            for(int i = 0; i < 8; i++) {
+                charMap[i] = *(charMapPtr + i);    
+            }
+            draw_8(charMap, 8, x_cursor, y);
+            x_cursor += 6;
         }
     }
 }
 
-void SSD1306::drawChar(char c, int x, int y) {
+void SSD1306::draw_8(uint8_t* bitmap, size_t width, int x, int y) {
 
-
+    int x_end = x + static_cast<int>(width);
+    int bitmap_ind = 0;
+    if((x < 0 || x > 127) || (y < 0 && y > 55)) {
+        std::cout << "Draw_8: Cursor index error" << std::endl;
+    }
+    else {
+        for(int col = x; col < x_end; col++) {
+            if(col < 128) {
+                frameBuffer[col] |= ((static_cast<uint64_t>(bitmap[bitmap_ind])) << y);
+                std::cout << std::bitset<64>(frameBuffer[col]) << std::endl;
+                bitmap_ind++;
+            }
+        }
+    }
 }
 
-const uint8_t* SSD1306::ASCIImap(char c) {
+void SSD1306::drawPixel(int x, int y, int color) {
+
+    if((x < 0 || x > 127) || (y < 0 || y > 63)) {
+        return;
+    }
+    color ? (frameBuffer[x] |= (1ULL << y)) : (frameBuffer[x] &= ~(1ULL << y));
+}
+
+// Usign Bresenham's line algorithm
+void SSD1306::drawLine(int x0, int y0, int x1, int y1, int width, int color) {
+    bool steep = abs(y1 - y0) > abs(x1 - x0); // Check if the line is steep
+    if (steep) {
+        // Swap x and y for steep lines
+        std::swap(x0, y0);
+        std::swap(x1, y1);
+    }
+    if (x0 > x1) {
+        // Ensure we're always drawing from left to right
+        std::swap(x0, x1);
+        std::swap(y0, y1);
+    }
+
+    int dx = x1 - x0;
+    int dy = abs(y1 - y0);
+    int error = dx / 2;
+    int yStep = (y0 < y1) ? 1 : -1;
+    int y = y0;
+
+    for (int x = x0; x <= x1; x++) {
+        // Draw the pixel, reversing the swap for steep lines
+        if (steep) {
+            for (int i = 0; i < width; i++) {
+                drawPixel(y + i, x, color); // Swap back x and y
+            }
+        } else {
+            for (int i = 0; i < width; i++) {
+                drawPixel(x, y + i, color);
+            }
+        }
+
+        error -= dy;
+        if (error < 0) {
+            y += yStep;
+            error += dx;
+        }
+    }
+}
+
+void SSD1306::drawHrzLine(int x0, int x1, int y, int color) {
+
+    if (y < 0 || y > 63) return;
+
+    int start_x = x0, end_x = x1;
+
+    if(x0 > x1) {
+        start_x = x1;
+        end_x = x0;
+    }
+    for(int i = start_x; i <= end_x; i++) {
+        drawPixel(i, y, color);
+    }
+}
+
+void SSD1306::drawVertLine(int y0, int y1, int x, int color) {
+
+    if (x < 0 || x > 127) return;
+
+    int start_y = y0, end_y = y1;
+
+    if(y0 > y1) {
+        start_y = y1;
+        end_y = y0;
+    }
+    for(int i = start_y; i <= end_y; i++) {
+        drawPixel(x, i, color);
+    }
+}
+
+void SSD1306::drawRectangle(int x0, int y0, int x1, int y1, int color) {
+    drawHrzLine(x0, x1, y0, color);
+    drawHrzLine(x0, x1, y1, color);
+    drawVertLine(y0, y1, x0, color);
+    drawVertLine(y0, y1, x1, color);
+}
+
+void SSD1306::drawTriangle(int x0, int y0, int x1, int y1, int x2, int y2, int width, int color) {
+
+drawLine(x0, y0, x1, y1, width, color);
+drawLine(x0, y0, x2, y2, width, color);
+drawLine(x1, y1, x2, y2, width, color);
+}
+
+void SSD1306::drawEqTriangle(int tipX, int tipY, int height, int width, int color) {
+
+    int left_x = tipX - floor((1732*height/2000));
+    std::cout << left_x << std::endl;
+    int right_x = tipX + floor((1732*height/2000));
+    std::cout << right_x << std::endl;
+    int base_y = tipY + height;
+
+    drawLine(tipX, tipY, left_x, base_y, width, color);
+    drawLine(tipX, tipY, right_x, base_y, width, color);
+    drawLine(left_x, base_y, right_x, base_y, width, color);
+}
+
+void SSD1306::draw_64(uint64_t* bitmap) {
+    std::memcpy(frameBuffer, bitmap, 1024);
+}
+
+void SSD1306::renderDisplay() {
+
+    uint8_t pageBuffer[129];   // Page buffer with control byte for data
+    pageBuffer[0] = 0x40;
+
+    for(int page = 0; page < 8; page++) {
+        for(int col = 0; col < 128; col++) {
+
+            pageBuffer[col + 1] = ((frameBuffer[col]) >> (page*8)) & 0xFF;
+        }
+        
+        if(setCursor(0, page) < 3) {
+            std::cout << "Error setting cursor" << std::endl;
+        } 
+        else {
+            if(write(file, pageBuffer, sizeof(pageBuffer)) != sizeof(pageBuffer)) {
+                std::cout << "There was an error writing page" << std::endl;
+                break;
+            }
+        }
+    }
+}
+
+void SSD1306::startHorizontalScroll(int startPage, int endPage, int direction, int speed) {
+
+    if((startPage < 0 || startPage > 7) || (endPage < 0 || endPage > 7)) {
+        std::cout << "Horizontal scrolling page index error : [" << startPage << " : " << endPage << "]" << std::endl;
+        return;
+    }
+    if(direction != 1 && direction != 0) {
+        std::cout << "Horizontal scrolling direction error : " << direction << std::endl;
+        return;
+    }
+    if(speed < 0 ||speed > 7) {
+        std::cout << "Horizontal scrolling speed error : " << speed << std::endl;
+        return;
+    }
+
+    uint8_t scrollDir = (direction == 1) ? 0x26 : 0x27;
+
+    const uint8_t commands[] = {
+        scrollDir,
+        0x00,
+        static_cast<uint8_t>(startPage),
+        static_cast<uint8_t>(speed),
+        static_cast<uint8_t>(endPage),
+        0x00,
+        0xFF
+    };
+
+    int scrollStatus = sendCommand(commands, sizeof(commands));
+    if(scrollStatus != (sizeof(commands) + 1)) {
+        std::cerr << "Scrolling configuration failed: (" << scrollStatus << ") " << strerror(scrollStatus) << " while writing" << std::endl;
+        return;
+    }
+    const uint8_t start_scroll = 0x2F;
+    scrollStatus = sendCommand(&start_scroll, 1);
+    if(scrollStatus != 2) {
+        std::cerr << "Starting scrolling failed: (" << scrollStatus << ") " << strerror(scrollStatus) << " while writing" << std::endl;
+    }
+}
+
+void SSD1306::startDiagonalRightScrl(int startPage, int endPage) {
+
+    uint8_t start = (uint8_t)startPage;
+    uint8_t end = (uint8_t)endPage;
+
+    const uint8_t commands[] = {
+        0x2A,
+        0x00,
+        start,
+        0x00,
+        end,
+        0x3F
+    };
+
+    sendCommand(commands, sizeof(commands));
+    const uint8_t start_scroll = 0x2F;
+    sendCommand(&start_scroll, 1);
+}
+
+void SSD1306::startDiagonalLeftScrl(int startPage, int endPage) {
+
+    uint8_t start = (uint8_t)startPage;
+    uint8_t end = (uint8_t)endPage;
+    const uint8_t start_scroll = 0x2F;
+
+
+    // Set  vertical scrolling area
+    const uint8_t commands[] = {
+        0xA3,
+        0x00,
+        0x40
+    };
+    
+    if(sendCommand(commands, sizeof(commands)) == sizeof(commands) + 1) {
+
+        const uint8_t diagCom[] = {
+            0x2A,
+            0x00,
+            start,
+            0x00,
+            end,
+            0x3F
+        };
+        
+        sendCommand(diagCom, sizeof(diagCom));
+    }
+
+    std::cout << "Started diag scroll " << (sendCommand(&start_scroll, 1) == 2) << std::endl;;
+}
+
+void SSD1306::stopScroll() {
+    const uint8_t stop_scroll = 0x2E;
+    sendCommand(&stop_scroll, 1);
+}
+
+uint8_t* SSD1306::ASCIImap(char c) {
 
     static unsigned char font_bitmap_6x8[] = {
-    /*
-     * code=0, hex=0x00, ascii="^@"
-     */
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-
-    /*
-     * code=1, hex=0x01, ascii="^A"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0xA8,  /* 10101 */
-    0xF8,  /* 11111 */
-    0xD8,  /* 11011 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=2, hex=0x02, ascii="^B"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0xA8,  /* 10101 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=3, hex=0x03, ascii="^C"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=4, hex=0x04, ascii="^D"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0xF8,  /* 11111 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=5, hex=0x05, ascii="^E"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0xA8,  /* 10101 */
-    0xF8,  /* 11111 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=6, hex=0x06, ascii="^F"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0xF8,  /* 11111 */
-    0xA8,  /* 10101 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=7, hex=0x07, ascii="^G"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=8, hex=0x08, ascii="^H"
-     */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-    0xD8,  /* 11011 */
-    0x88,  /* 10001 */
-    0xD8,  /* 11011 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-
-    /*
-     * code=9, hex=0x09, ascii="^I"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x50,  /* 01010 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=10, hex=0x0A, ascii="^J"
-     */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-    0xD8,  /* 11011 */
-    0x88,  /* 10001 */
-    0xD8,  /* 11011 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-
-    /*
-     * code=11, hex=0x0B, ascii="^K"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x38,  /* 00111 */
-    0x18,  /* 00011 */
-    0x68,  /* 01101 */
-    0xA0,  /* 10100 */
-    0x40,  /* 01000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=12, hex=0x0C, ascii="^L"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x50,  /* 01010 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=13, hex=0x0D, ascii="^M"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x50,  /* 01010 */
-    0x40,  /* 01000 */
-    0xC0,  /* 11000 */
-    0x80,  /* 10000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=14, hex=0x0E, ascii="^N"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x38,  /* 00111 */
-    0x48,  /* 01001 */
-    0x58,  /* 01011 */
-    0xD0,  /* 11010 */
-    0x80,  /* 10000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=15, hex=0x0F, ascii="^O"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x50,  /* 01010 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=16, hex=0x10, ascii="^P"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x40,  /* 01000 */
-    0x60,  /* 01100 */
-    0x70,  /* 01110 */
-    0x60,  /* 01100 */
-    0x40,  /* 01000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=17, hex=0x11, ascii="^Q"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x10,  /* 00010 */
-    0x30,  /* 00110 */
-    0x70,  /* 01110 */
-    0x30,  /* 00110 */
-    0x10,  /* 00010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=18, hex=0x12, ascii="^R"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=19, hex=0x13, ascii="^S"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=20, hex=0x14, ascii="^T"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x78,  /* 01111 */
-    0xD0,  /* 11010 */
-    0xD0,  /* 11010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-
-    /*
-     * code=21, hex=0x15, ascii="^U"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x18,  /* 00011 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x48,  /* 01001 */
-    0x30,  /* 00110 */
-    0xC0,  /* 11000 */
-
-    /*
-     * code=22, hex=0x16, ascii="^V"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=23, hex=0x17, ascii="^W"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-
-    /*
-     * code=24, hex=0x18, ascii="^X"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=25, hex=0x19, ascii="^Y"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=26, hex=0x1A, ascii="^Z"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x10,  /* 00010 */
-    0xF8,  /* 11111 */
-    0x10,  /* 00010 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=27, hex=0x1B, ascii="^["
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x40,  /* 01000 */
-    0xF8,  /* 11111 */
-    0x40,  /* 01000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=28, hex=0x1C, ascii="^\"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x80,  /* 10000 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=29, hex=0x1D, ascii="^]"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0xF8,  /* 11111 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=30, hex=0x1E, ascii="^^"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=31, hex=0x1F, ascii="^_"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=32, hex=0x20, ascii=" "
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=33, hex=0x21, ascii="!"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=34, hex=0x22, ascii="""
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=35, hex=0x23, ascii="#"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0xF8,  /* 11111 */
-    0x50,  /* 01010 */
-    0xF8,  /* 11111 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=36, hex=0x24, ascii="$"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x30,  /* 00110 */
-    0x40,  /* 01000 */
-    0x30,  /* 00110 */
-    0x60,  /* 01100 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=37, hex=0x25, ascii="%"
-     */
-    0x00,  /* 00000 */
-    0x40,  /* 01000 */
-    0xA8,  /* 10101 */
-    0x50,  /* 01010 */
-    0x30,  /* 00110 */
-    0x68,  /* 01101 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=38, hex=0x26, ascii="&"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x30,  /* 00110 */
-    0x40,  /* 01000 */
-    0x68,  /* 01101 */
-    0x90,  /* 10010 */
-    0x68,  /* 01101 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=39, hex=0x27, ascii="'"
-     */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=40, hex=0x28, ascii="("
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=41, hex=0x29, ascii=")"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x40,  /* 01000 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=42, hex=0x2A, ascii="*"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=43, hex=0x2B, ascii="+"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=44, hex=0x2C, ascii=","
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-
-    /*
-     * code=45, hex=0x2D, ascii="-"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF0,  /* 11110 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=46, hex=0x2E, ascii="."
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=47, hex=0x2F, ascii="/"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x10,  /* 00010 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=48, hex=0x30, ascii="0"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=49, hex=0x31, ascii="1"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x60,  /* 01100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=50, hex=0x32, ascii="2"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-    0xF0,  /* 11110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=51, hex=0x33, ascii="3"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xE0,  /* 11100 */
-    0x10,  /* 00010 */
-    0x60,  /* 01100 */
-    0x10,  /* 00010 */
-    0xE0,  /* 11100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=52, hex=0x34, ascii="4"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x10,  /* 00010 */
-    0x30,  /* 00110 */
-    0x50,  /* 01010 */
-    0xF0,  /* 11110 */
-    0x10,  /* 00010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=53, hex=0x35, ascii="5"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF0,  /* 11110 */
-    0x80,  /* 10000 */
-    0xE0,  /* 11100 */
-    0x10,  /* 00010 */
-    0xE0,  /* 11100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=54, hex=0x36, ascii="6"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x80,  /* 10000 */
-    0xE0,  /* 11100 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=55, hex=0x37, ascii="7"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF0,  /* 11110 */
-    0x10,  /* 00010 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=56, hex=0x38, ascii="8"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=57, hex=0x39, ascii="9"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x70,  /* 01110 */
-    0x10,  /* 00010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=58, hex=0x3A, ascii=":"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=59, hex=0x3B, ascii=";"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-
-    /*
-     * code=60, hex=0x3C, ascii="<"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x10,  /* 00010 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-    0x20,  /* 00100 */
-    0x10,  /* 00010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=61, hex=0x3D, ascii="="
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=62, hex=0x3E, ascii=">"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x40,  /* 01000 */
-    0x20,  /* 00100 */
-    0x10,  /* 00010 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=63, hex=0x3F, ascii="?"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x10,  /* 00010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-    0x40,  /* 01000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=64, hex=0x40, ascii="@"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0x88,  /* 10001 */
-    0xB0,  /* 10110 */
-    0x80,  /* 10000 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=65, hex=0x41, ascii="A"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0xF0,  /* 11110 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=66, hex=0x42, ascii="B"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xE0,  /* 11100 */
-    0x90,  /* 10010 */
-    0xE0,  /* 11100 */
-    0x90,  /* 10010 */
-    0xE0,  /* 11100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=67, hex=0x43, ascii="C"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0x80,  /* 10000 */
-    0x80,  /* 10000 */
-    0x80,  /* 10000 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=68, hex=0x44, ascii="D"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xE0,  /* 11100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0xE0,  /* 11100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=69, hex=0x45, ascii="E"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF0,  /* 11110 */
-    0x80,  /* 10000 */
-    0xE0,  /* 11100 */
-    0x80,  /* 10000 */
-    0xF0,  /* 11110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=70, hex=0x46, ascii="F"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF0,  /* 11110 */
-    0x80,  /* 10000 */
-    0xE0,  /* 11100 */
-    0x80,  /* 10000 */
-    0x80,  /* 10000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=71, hex=0x47, ascii="G"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x80,  /* 10000 */
-    0x90,  /* 10010 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=72, hex=0x48, ascii="H"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0xF0,  /* 11110 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=73, hex=0x49, ascii="I"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=74, hex=0x4A, ascii="J"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x10,  /* 00010 */
-    0x10,  /* 00010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=75, hex=0x4B, ascii="K"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0xA0,  /* 10100 */
-    0xC0,  /* 11000 */
-    0xA0,  /* 10100 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=76, hex=0x4C, ascii="L"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x80,  /* 10000 */
-    0x80,  /* 10000 */
-    0x80,  /* 10000 */
-    0x80,  /* 10000 */
-    0xF0,  /* 11110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=77, hex=0x4D, ascii="M"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0xF0,  /* 11110 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=78, hex=0x4E, ascii="N"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0xD0,  /* 11010 */
-    0xB0,  /* 10110 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=79, hex=0x4F, ascii="O"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=80, hex=0x50, ascii="P"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xE0,  /* 11100 */
-    0x90,  /* 10010 */
-    0xE0,  /* 11100 */
-    0x80,  /* 10000 */
-    0x80,  /* 10000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=81, hex=0x51, ascii="Q"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x10,  /* 00010 */
-
-    /*
-     * code=82, hex=0x52, ascii="R"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xE0,  /* 11100 */
-    0x90,  /* 10010 */
-    0xE0,  /* 11100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=83, hex=0x53, ascii="S"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0x80,  /* 10000 */
-    0x60,  /* 01100 */
-    0x10,  /* 00010 */
-    0xE0,  /* 11100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=84, hex=0x54, ascii="T"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=85, hex=0x55, ascii="U"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=86, hex=0x56, ascii="V"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=87, hex=0x57, ascii="W"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x88,  /* 10001 */
-    0xA8,  /* 10101 */
-    0xA8,  /* 10101 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=88, hex=0x58, ascii="X"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x50,  /* 01010 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=89, hex=0x59, ascii="Y"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=90, hex=0x5A, ascii="Z"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF0,  /* 11110 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-    0x80,  /* 10000 */
-    0xF0,  /* 11110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=91, hex=0x5B, ascii="["
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=92, hex=0x5C, ascii="\"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x10,  /* 00010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=93, hex=0x5D, ascii="]"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=94, hex=0x5E, ascii="^"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=95, hex=0x5F, ascii="_"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-
-    /*
-     * code=96, hex=0x60, ascii="`"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x40,  /* 01000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=97, hex=0x61, ascii="a"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x10,  /* 00010 */
-    0x70,  /* 01110 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=98, hex=0x62, ascii="b"
-     */
-    0x00,  /* 00000 */
-    0x80,  /* 10000 */
-    0x80,  /* 10000 */
-    0xE0,  /* 11100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0xE0,  /* 11100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=99, hex=0x63, ascii="c"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x30,  /* 00110 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x30,  /* 00110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=100, hex=0x64, ascii="d"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x10,  /* 00010 */
-    0x70,  /* 01110 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=101, hex=0x65, ascii="e"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0xF0,  /* 11110 */
-    0x80,  /* 10000 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=102, hex=0x66, ascii="f"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x30,  /* 00110 */
-    0x40,  /* 01000 */
-    0xE0,  /* 11100 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=103, hex=0x67, ascii="g"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0x90,  /* 10010 */
-    0x70,  /* 01110 */
-    0x10,  /* 00010 */
-    0x60,  /* 01100 */
-
-    /*
-     * code=104, hex=0x68, ascii="h"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x80,  /* 10000 */
-    0xE0,  /* 11100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=105, hex=0x69, ascii="i"
-     */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=106, hex=0x6A, ascii="j"
-     */
-    0x00,  /* 00000 */
-    0x10,  /* 00010 */
-    0x00,  /* 00000 */
-    0x10,  /* 00010 */
-    0x10,  /* 00010 */
-    0x10,  /* 00010 */
-    0x10,  /* 00010 */
-    0x60,  /* 01100 */
-
-    /*
-     * code=107, hex=0x6B, ascii="k"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x80,  /* 10000 */
-    0xA0,  /* 10100 */
-    0xC0,  /* 11000 */
-    0xA0,  /* 10100 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=108, hex=0x6C, ascii="l"
-     */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=109, hex=0x6D, ascii="m"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0xF0,  /* 11110 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=110, hex=0x6E, ascii="n"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xE0,  /* 11100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=111, hex=0x6F, ascii="o"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=112, hex=0x70, ascii="p"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xE0,  /* 11100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0xE0,  /* 11100 */
-    0x80,  /* 10000 */
-
-    /*
-     * code=113, hex=0x71, ascii="q"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x70,  /* 01110 */
-    0x10,  /* 00010 */
-
-    /*
-     * code=114, hex=0x72, ascii="r"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0x60,  /* 01100 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=115, hex=0x73, ascii="s"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0xC0,  /* 11000 */
-    0x30,  /* 00110 */
-    0xE0,  /* 11100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=116, hex=0x74, ascii="t"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x40,  /* 01000 */
-    0xF0,  /* 11110 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x30,  /* 00110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=117, hex=0x75, ascii="u"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=118, hex=0x76, ascii="v"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=119, hex=0x77, ascii="w"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0xF0,  /* 11110 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=120, hex=0x78, ascii="x"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=121, hex=0x79, ascii="y"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x70,  /* 01110 */
-    0x10,  /* 00010 */
-    0x60,  /* 01100 */
-
-    /*
-     * code=122, hex=0x7A, ascii="z"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF0,  /* 11110 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-    0xF0,  /* 11110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=123, hex=0x7B, ascii="{"
-     */
-    0x00,  /* 00000 */
-    0x10,  /* 00010 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x20,  /* 00100 */
-    0x10,  /* 00010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=124, hex=0x7C, ascii="|"
-     */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=125, hex=0x7D, ascii="}"
-     */
-    0x00,  /* 00000 */
-    0x40,  /* 01000 */
-    0x20,  /* 00100 */
-    0x10,  /* 00010 */
-    0x10,  /* 00010 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=126, hex=0x7E, ascii="~"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0xA0,  /* 10100 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=127, hex=0x7F, ascii="^?"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x50,  /* 01010 */
-    0x88,  /* 10001 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=128, hex=0x80, ascii="!^@"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0x80,  /* 10000 */
-    0x80,  /* 10000 */
-    0x80,  /* 10000 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=129, hex=0x81, ascii="!^A"
-     */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=130, hex=0x82, ascii="!^B"
-     */
-    0x10,  /* 00010 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0xF0,  /* 11110 */
-    0x80,  /* 10000 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=131, hex=0x83, ascii="!^C"
-     */
-    0x20,  /* 00100 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0xC0,  /* 11000 */
-    0x20,  /* 00100 */
-    0xA0,  /* 10100 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=132, hex=0x84, ascii="!^D"
-     */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0xC0,  /* 11000 */
-    0x20,  /* 00100 */
-    0x60,  /* 01100 */
-    0xB0,  /* 10110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=133, hex=0x85, ascii="!^E"
-     */
-    0x40,  /* 01000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0xC0,  /* 11000 */
-    0x20,  /* 00100 */
-    0x60,  /* 01100 */
-    0xB0,  /* 10110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=134, hex=0x86, ascii="!^F"
-     */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0xC0,  /* 11000 */
-    0x20,  /* 00100 */
-    0x60,  /* 01100 */
-    0xB0,  /* 10110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=135, hex=0x87, ascii="!^G"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x30,  /* 00110 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x30,  /* 00110 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=136, hex=0x88, ascii="!^H"
-     */
-    0x20,  /* 00100 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0xF0,  /* 11110 */
-    0x80,  /* 10000 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=137, hex=0x89, ascii="!^I"
-     */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0xF0,  /* 11110 */
-    0x80,  /* 10000 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=138, hex=0x8A, ascii="!^J"
-     */
-    0x40,  /* 01000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0xF0,  /* 11110 */
-    0x80,  /* 10000 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=139, hex=0x8B, ascii="!^K"
-     */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=140, hex=0x8C, ascii="!^L"
-     */
-    0x20,  /* 00100 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=141, hex=0x8D, ascii="!^M"
-     */
-    0x40,  /* 01000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=142, hex=0x8E, ascii="!^N"
-     */
-    0xA0,  /* 10100 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0xF0,  /* 11110 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=143, hex=0x8F, ascii="!^O"
-     */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0xF0,  /* 11110 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=144, hex=0x90, ascii="!^P"
-     */
-    0x10,  /* 00010 */
-    0x20,  /* 00100 */
-    0xF0,  /* 11110 */
-    0x80,  /* 10000 */
-    0xE0,  /* 11100 */
-    0x80,  /* 10000 */
-    0xF0,  /* 11110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=145, hex=0x91, ascii="!^Q"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xD8,  /* 11011 */
-    0x78,  /* 01111 */
-    0xE0,  /* 11100 */
-    0xB8,  /* 10111 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=146, hex=0x92, ascii="!^R"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0xA0,  /* 10100 */
-    0xF0,  /* 11110 */
-    0xA0,  /* 10100 */
-    0xB0,  /* 10110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=147, hex=0x93, ascii="!^S"
-     */
-    0x20,  /* 00100 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=148, hex=0x94, ascii="!^T"
-     */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=149, hex=0x95, ascii="!^U"
-     */
-    0x40,  /* 01000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=150, hex=0x96, ascii="!^V"
-     */
-    0x20,  /* 00100 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=151, hex=0x97, ascii="!^W"
-     */
-    0x40,  /* 01000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=152, hex=0x98, ascii="!^X"
-     */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x70,  /* 01110 */
-    0x10,  /* 00010 */
-    0x60,  /* 01100 */
-
-    /*
-     * code=153, hex=0x99, ascii="!^Y"
-     */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=154, hex=0x9A, ascii="!^Z"
-     */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=155, hex=0x9B, ascii="!^["
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x80,  /* 10000 */
-    0x80,  /* 10000 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=156, hex=0x9C, ascii="!^\"
-     */
-    0x00,  /* 00000 */
-    0x30,  /* 00110 */
-    0x50,  /* 01010 */
-    0x40,  /* 01000 */
-    0xE0,  /* 11100 */
-    0x40,  /* 01000 */
-    0xF0,  /* 11110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=157, hex=0x9D, ascii="!^]"
-     */
-    0x00,  /* 00000 */
-    0xD8,  /* 11011 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=158, hex=0x9E, ascii="!^^"
-     */
-    0x00,  /* 00000 */
-    0xC0,  /* 11000 */
-    0xA0,  /* 10100 */
-    0xB0,  /* 10110 */
-    0xF8,  /* 11111 */
-    0x90,  /* 10010 */
-    0x88,  /* 10001 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=159, hex=0x9F, ascii="!^_"
-     */
-    0x00,  /* 00000 */
-    0x30,  /* 00110 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0xF0,  /* 11110 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x80,  /* 10000 */
-
-    /*
-     * code=160, hex=0xA0, ascii="! "
-     */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-    0x00,  /* 00000 */
-    0xC0,  /* 11000 */
-    0x20,  /* 00100 */
-    0x60,  /* 01100 */
-    0xB0,  /* 10110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=161, hex=0xA1, ascii="!!"
-     */
-    0x10,  /* 00010 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=162, hex=0xA2, ascii="!""
-     */
-    0x10,  /* 00010 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=163, hex=0xA3, ascii="!#"
-     */
-    0x10,  /* 00010 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=164, hex=0xA4, ascii="!$"
-     */
-    0x50,  /* 01010 */
-    0xA0,  /* 10100 */
-    0x00,  /* 00000 */
-    0xE0,  /* 11100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=165, hex=0xA5, ascii="!%"
-     */
-    0x50,  /* 01010 */
-    0xA0,  /* 10100 */
-    0x90,  /* 10010 */
-    0xD0,  /* 11010 */
-    0xD0,  /* 11010 */
-    0xB0,  /* 10110 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=166, hex=0xA6, ascii="!&"
-     */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x50,  /* 01010 */
-    0x30,  /* 00110 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=167, hex=0xA7, ascii="!'"
-     */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x50,  /* 01010 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=168, hex=0xA8, ascii="!("
-     */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=169, hex=0xA9, ascii="!)"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0x80,  /* 10000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=170, hex=0xAA, ascii="!*"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0x08,  /* 00001 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=171, hex=0xAB, ascii="!+"
-     */
-    0x00,  /* 00000 */
-    0x80,  /* 10000 */
-    0x90,  /* 10010 */
-    0xA0,  /* 10100 */
-    0x58,  /* 01011 */
-    0x88,  /* 10001 */
-    0x38,  /* 00111 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=172, hex=0xAC, ascii="!,"
-     */
-    0x00,  /* 00000 */
-    0x88,  /* 10001 */
-    0x90,  /* 10010 */
-    0xA0,  /* 10100 */
-    0x48,  /* 01001 */
-    0x98,  /* 10011 */
-    0x38,  /* 00111 */
-    0x08,  /* 00001 */
-
-    /*
-     * code=173, hex=0xAD, ascii="!-"
-     */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=174, hex=0xAE, ascii="!."
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0xA0,  /* 10100 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=175, hex=0xAF, ascii="!/"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xA0,  /* 10100 */
-    0x50,  /* 01010 */
-    0xA0,  /* 10100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=176, hex=0xB0, ascii="!0"
-     */
-    0xA8,  /* 10101 */
-    0x50,  /* 01010 */
-    0xA8,  /* 10101 */
-    0x50,  /* 01010 */
-    0xA8,  /* 10101 */
-    0x50,  /* 01010 */
-    0xA8,  /* 10101 */
-    0x50,  /* 01010 */
-
-    /*
-     * code=177, hex=0xB1, ascii="!1"
-     */
-    0xE8,  /* 11101 */
-    0x50,  /* 01010 */
-    0xB8,  /* 10111 */
-    0x50,  /* 01010 */
-    0xE8,  /* 11101 */
-    0x50,  /* 01010 */
-    0xB8,  /* 10111 */
-    0x50,  /* 01010 */
-
-    /*
-     * code=178, hex=0xB2, ascii="!2"
-     */
-    0xD8,  /* 11011 */
-    0x70,  /* 01110 */
-    0xD8,  /* 11011 */
-    0x70,  /* 01110 */
-    0xD8,  /* 11011 */
-    0x70,  /* 01110 */
-    0xD8,  /* 11011 */
-    0x70,  /* 01110 */
-
-    /*
-     * code=179, hex=0xB3, ascii="!3"
-     */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=180, hex=0xB4, ascii="!4"
-     */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0xE0,  /* 11100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=181, hex=0xB5, ascii="!5"
-     */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0xE0,  /* 11100 */
-    0x20,  /* 00100 */
-    0xE0,  /* 11100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=182, hex=0xB6, ascii="!6"
-     */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0xD0,  /* 11010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-
-    /*
-     * code=183, hex=0xB7, ascii="!7"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF0,  /* 11110 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-
-    /*
-     * code=184, hex=0xB8, ascii="!8"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xE0,  /* 11100 */
-    0x20,  /* 00100 */
-    0xE0,  /* 11100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=185, hex=0xB9, ascii="!9"
-     */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0xD0,  /* 11010 */
-    0x10,  /* 00010 */
-    0xD0,  /* 11010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-
-    /*
-     * code=186, hex=0xBA, ascii="!:"
-     */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-
-    /*
-     * code=187, hex=0xBB, ascii="!;"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF0,  /* 11110 */
-    0x10,  /* 00010 */
-    0xD0,  /* 11010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-
-    /*
-     * code=188, hex=0xBC, ascii="!<"
-     */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0xD0,  /* 11010 */
-    0x10,  /* 00010 */
-    0xF0,  /* 11110 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=189, hex=0xBD, ascii="!="
-     */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0xF0,  /* 11110 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=190, hex=0xBE, ascii="!>"
-     */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0xE0,  /* 11100 */
-    0x20,  /* 00100 */
-    0xE0,  /* 11100 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=191, hex=0xBF, ascii="!?"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xE0,  /* 11100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=192, hex=0xC0, ascii="!@"
-     */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x38,  /* 00111 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=193, hex=0xC1, ascii="!A"
-     */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=194, hex=0xC2, ascii="!B"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=195, hex=0xC3, ascii="!C"
-     */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x38,  /* 00111 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=196, hex=0xC4, ascii="!D"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=197, hex=0xC5, ascii="!E"
-     */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0xF8,  /* 11111 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=198, hex=0xC6, ascii="!F"
-     */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x38,  /* 00111 */
-    0x20,  /* 00100 */
-    0x38,  /* 00111 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=199, hex=0xC7, ascii="!G"
-     */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x58,  /* 01011 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-
-    /*
-     * code=200, hex=0xC8, ascii="!H"
-     */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x58,  /* 01011 */
-    0x40,  /* 01000 */
-    0x78,  /* 01111 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=201, hex=0xC9, ascii="!I"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x78,  /* 01111 */
-    0x40,  /* 01000 */
-    0x58,  /* 01011 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-
-    /*
-     * code=202, hex=0xCA, ascii="!J"
-     */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0xD8,  /* 11011 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=203, hex=0xCB, ascii="!K"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-    0xD8,  /* 11011 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-
-    /*
-     * code=204, hex=0xCC, ascii="!L"
-     */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x58,  /* 01011 */
-    0x40,  /* 01000 */
-    0x58,  /* 01011 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-
-    /*
-     * code=205, hex=0xCD, ascii="!M"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=206, hex=0xCE, ascii="!N"
-     */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0xD8,  /* 11011 */
-    0x00,  /* 00000 */
-    0xD8,  /* 11011 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-
-    /*
-     * code=207, hex=0xCF, ascii="!O"
-     */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=208, hex=0xD0, ascii="!P"
-     */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=209, hex=0xD1, ascii="!Q"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=210, hex=0xD2, ascii="!R"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-
-    /*
-     * code=211, hex=0xD3, ascii="!S"
-     */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x78,  /* 01111 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=212, hex=0xD4, ascii="!T"
-     */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x38,  /* 00111 */
-    0x20,  /* 00100 */
-    0x38,  /* 00111 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=213, hex=0xD5, ascii="!U"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x38,  /* 00111 */
-    0x20,  /* 00100 */
-    0x38,  /* 00111 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=214, hex=0xD6, ascii="!V"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x78,  /* 01111 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-
-    /*
-     * code=215, hex=0xD7, ascii="!W"
-     */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0xF8,  /* 11111 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-
-    /*
-     * code=216, hex=0xD8, ascii="!X"
-     */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0xF8,  /* 11111 */
-    0x20,  /* 00100 */
-    0xF8,  /* 11111 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=217, hex=0xD9, ascii="!Y"
-     */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0xE0,  /* 11100 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=218, hex=0xDA, ascii="!Z"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x38,  /* 00111 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=219, hex=0xDB, ascii="!["
-     */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-
-    /*
-     * code=220, hex=0xDC, ascii="!\"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-
-    /*
-     * code=221, hex=0xDD, ascii="!]"
-     */
-    0xE0,  /* 11100 */
-    0xE0,  /* 11100 */
-    0xE0,  /* 11100 */
-    0xE0,  /* 11100 */
-    0xE0,  /* 11100 */
-    0xE0,  /* 11100 */
-    0xE0,  /* 11100 */
-    0xE0,  /* 11100 */
-
-    /*
-     * code=222, hex=0xDE, ascii="!^"
-     */
-    0x18,  /* 00011 */
-    0x18,  /* 00011 */
-    0x18,  /* 00011 */
-    0x18,  /* 00011 */
-    0x18,  /* 00011 */
-    0x18,  /* 00011 */
-    0x18,  /* 00011 */
-    0x18,  /* 00011 */
-
-    /*
-     * code=223, hex=0xDF, ascii="!_"
-     */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=224, hex=0xE0, ascii="!`"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x68,  /* 01101 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x68,  /* 01101 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=225, hex=0xE1, ascii="!a"
-     */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0xF0,  /* 11110 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0xE0,  /* 11100 */
-    0x80,  /* 10000 */
-
-    /*
-     * code=226, hex=0xE2, ascii="!b"
-     */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=227, hex=0xE3, ascii="!c"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=228, hex=0xE4, ascii="!d"
-     */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0x48,  /* 01001 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-    0x88,  /* 10001 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=229, hex=0xE5, ascii="!e"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x78,  /* 01111 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=230, hex=0xE6, ascii="!f"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0xE8,  /* 11101 */
-    0x80,  /* 10000 */
-
-    /*
-     * code=231, hex=0xE7, ascii="!g"
-     */
-    0x00,  /* 00000 */
-    0x98,  /* 10011 */
-    0x50,  /* 01010 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=232, hex=0xE8, ascii="!h"
-     */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x88,  /* 10001 */
-    0x70,  /* 01110 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=233, hex=0xE9, ascii="!i"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0x88,  /* 10001 */
-    0xF8,  /* 11111 */
-    0x88,  /* 10001 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=234, hex=0xEA, ascii="!j"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0x88,  /* 10001 */
-    0x88,  /* 10001 */
-    0x50,  /* 01010 */
-    0xD8,  /* 11011 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=235, hex=0xEB, ascii="!k"
-     */
-    0x60,  /* 01100 */
-    0x80,  /* 10000 */
-    0x40,  /* 01000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=236, hex=0xEC, ascii="!l"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0xA8,  /* 10101 */
-    0xA8,  /* 10101 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=237, hex=0xED, ascii="!m"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x08,  /* 00001 */
-    0x70,  /* 01110 */
-    0xA8,  /* 10101 */
-    0x48,  /* 01001 */
-    0xB0,  /* 10110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=238, hex=0xEE, ascii="!n"
-     */
-    0x00,  /* 00000 */
-    0x30,  /* 00110 */
-    0x40,  /* 01000 */
-    0x70,  /* 01110 */
-    0x40,  /* 01000 */
-    0x40,  /* 01000 */
-    0x30,  /* 00110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=239, hex=0xEF, ascii="!o"
-     */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x90,  /* 10010 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=240, hex=0xF0, ascii="!p"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0xF0,  /* 11110 */
-    0x00,  /* 00000 */
-    0xF0,  /* 11110 */
-    0x00,  /* 00000 */
-    0xF0,  /* 11110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=241, hex=0xF1, ascii="!q"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0xF8,  /* 11111 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0xF8,  /* 11111 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=242, hex=0xF2, ascii="!r"
-     */
-    0x00,  /* 00000 */
-    0x40,  /* 01000 */
-    0x20,  /* 00100 */
-    0x10,  /* 00010 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-    0xF0,  /* 11110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=243, hex=0xF3, ascii="!s"
-     */
-    0x00,  /* 00000 */
-    0x10,  /* 00010 */
-    0x20,  /* 00100 */
-    0x40,  /* 01000 */
-    0x20,  /* 00100 */
-    0x10,  /* 00010 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=244, hex=0xF4, ascii="!t"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x18,  /* 00011 */
-    0x28,  /* 00101 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-
-    /*
-     * code=245, hex=0xF5, ascii="!u"
-     */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0x20,  /* 00100 */
-    0xA0,  /* 10100 */
-    0xC0,  /* 11000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=246, hex=0xF6, ascii="!v"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-    0xF0,  /* 11110 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=247, hex=0xF7, ascii="!w"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0xA0,  /* 10100 */
-    0x00,  /* 00000 */
-    0x50,  /* 01010 */
-    0xA0,  /* 10100 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=248, hex=0xF8, ascii="!x"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x50,  /* 01010 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=249, hex=0xF9, ascii="!y"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x60,  /* 01100 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=250, hex=0xFA, ascii="!z"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x20,  /* 00100 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=251, hex=0xFB, ascii="!{"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x18,  /* 00011 */
-    0x10,  /* 00010 */
-    0x20,  /* 00100 */
-    0xA0,  /* 10100 */
-    0x40,  /* 01000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=252, hex=0xFC, ascii="!|"
-     */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x50,  /* 01010 */
-    0x50,  /* 01010 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=253, hex=0xFD, ascii="!}"
-     */
-    0x00,  /* 00000 */
-    0x60,  /* 01100 */
-    0x10,  /* 00010 */
-    0x20,  /* 00100 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=254, hex=0xFE, ascii="!~"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x70,  /* 01110 */
-    0x70,  /* 01110 */
-    0x70,  /* 01110 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-
-    /*
-     * code=255, hex=0xFF, ascii="!^"
-     */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00,  /* 00000 */
-    0x00  /* 00000 */ };
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00, // char 0x00
+        0x38,0x74,0x5c,0x74,0x38,0x00,0x00,0x00, // char 0x01
+        0x38,0x74,0x7c,0x74,0x38,0x00,0x00,0x00, // char 0x02
+        0x18,0x3c,0x78,0x3c,0x18,0x00,0x00,0x00, // char 0x03
+        0x10,0x38,0x7c,0x38,0x10,0x00,0x00,0x00, // char 0x04
+        0x18,0x14,0x7c,0x14,0x18,0x00,0x00,0x00, // char 0x05
+        0x30,0x18,0x7c,0x18,0x30,0x00,0x00,0x00, // char 0x06
+        0x00,0x10,0x38,0x10,0x00,0x00,0x00,0x00, // char 0x07
+        0xfe,0xee,0xc6,0xee,0xfe,0x00,0x00,0x00, // char 0x08
+        0x00,0x10,0x28,0x10,0x00,0x00,0x00,0x00, // char 0x09
+        0xfe,0xee,0xc6,0xee,0xfe,0x00,0x00,0x00, // char 0x0A
+        0x20,0x50,0x34,0x0c,0x1c,0x00,0x00,0x00, // char 0x0B
+        0x00,0x28,0x74,0x28,0x00,0x00,0x00,0x00, // char 0x0C
+        0x60,0x38,0x04,0x08,0x00,0x00,0x00,0x00, // char 0x0D
+        0x60,0x38,0x04,0x34,0x1c,0x00,0x00,0x00, // char 0x0E
+        0x00,0x10,0x28,0x10,0x00,0x00,0x00,0x00, // char 0x0F
+        0x00,0x7c,0x38,0x10,0x00,0x00,0x00,0x00, // char 0x10
+        0x00,0x10,0x38,0x7c,0x00,0x00,0x00,0x00, // char 0x11
+        0x00,0x28,0x7c,0x28,0x00,0x00,0x00,0x00, // char 0x12
+        0x00,0x5c,0x00,0x5c,0x00,0x00,0x00,0x00, // char 0x13
+        0x18,0xfc,0x04,0xfc,0x04,0x00,0x00,0x00, // char 0x14
+        0x90,0xa8,0x48,0x54,0x24,0x00,0x00,0x00, // char 0x15
+        0x60,0x60,0x60,0x60,0x60,0x00,0x00,0x00, // char 0x16
+        0x00,0xa8,0xfc,0xa8,0x00,0x00,0x00,0x00, // char 0x17
+        0x00,0x08,0x7c,0x08,0x00,0x00,0x00,0x00, // char 0x18
+        0x00,0x20,0x7c,0x20,0x00,0x00,0x00,0x00, // char 0x19
+        0x10,0x10,0x10,0x38,0x10,0x00,0x00,0x00, // char 0x1A
+        0x10,0x38,0x10,0x10,0x10,0x00,0x00,0x00, // char 0x1B
+        0x30,0x20,0x20,0x20,0x20,0x00,0x00,0x00, // char 0x1C
+        0x10,0x38,0x10,0x38,0x10,0x00,0x00,0x00, // char 0x1D
+        0x40,0x60,0x70,0x60,0x40,0x00,0x00,0x00, // char 0x1E
+        0x10,0x30,0x70,0x30,0x10,0x00,0x00,0x00, // char 0x1F
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00, // char 0x20
+        0x00,0x00,0x5c,0x00,0x00,0x00,0x00,0x00, // char 0x21
+        0x00,0x0c,0x00,0x0c,0x00,0x00,0x00,0x00, // char 0x22
+        0x28,0x7c,0x28,0x7c,0x28,0x00,0x00,0x00, // char 0x23
+        0x00,0x50,0xec,0x28,0x00,0x00,0x00,0x00, // char 0x24
+        0x44,0x2a,0x34,0x58,0x24,0x00,0x00,0x00, // char 0x25
+        0x20,0x58,0x54,0x24,0x50,0x00,0x00,0x00, // char 0x26
+        0x00,0x00,0x06,0x00,0x00,0x00,0x00,0x00, // char 0x27
+        0x00,0x38,0x44,0x00,0x00,0x00,0x00,0x00, // char 0x28
+        0x00,0x44,0x38,0x00,0x00,0x00,0x00,0x00, // char 0x29
+        0x00,0x54,0x38,0x54,0x00,0x00,0x00,0x00, // char 0x2A
+        0x00,0x10,0x38,0x10,0x00,0x00,0x00,0x00, // char 0x2B
+        0x00,0x80,0x40,0x00,0x00,0x00,0x00,0x00, // char 0x2C
+        0x08,0x08,0x08,0x08,0x00,0x00,0x00,0x00, // char 0x2D
+        0x00,0x00,0x40,0x00,0x00,0x00,0x00,0x00, // char 0x2E
+        0x00,0x60,0x18,0x04,0x00,0x00,0x00,0x00, // char 0x2F
+        0x38,0x44,0x44,0x38,0x00,0x00,0x00,0x00, // char 0x30
+        0x00,0x08,0x7c,0x00,0x00,0x00,0x00,0x00, // char 0x31
+        0x48,0x64,0x54,0x48,0x00,0x00,0x00,0x00, // char 0x32
+        0x44,0x54,0x54,0x28,0x00,0x00,0x00,0x00, // char 0x33
+        0x20,0x30,0x28,0x7c,0x00,0x00,0x00,0x00, // char 0x34
+        0x5c,0x54,0x54,0x24,0x00,0x00,0x00,0x00, // char 0x35
+        0x38,0x54,0x54,0x20,0x00,0x00,0x00,0x00, // char 0x36
+        0x04,0x64,0x14,0x0c,0x00,0x00,0x00,0x00, // char 0x37
+        0x28,0x54,0x54,0x28,0x00,0x00,0x00,0x00, // char 0x38
+        0x08,0x54,0x54,0x38,0x00,0x00,0x00,0x00, // char 0x39
+        0x00,0x00,0x50,0x00,0x00,0x00,0x00,0x00, // char 0x3A
+        0x00,0x80,0x50,0x00,0x00,0x00,0x00,0x00, // char 0x3B
+        0x00,0x10,0x28,0x44,0x00,0x00,0x00,0x00, // char 0x3C
+        0x00,0x28,0x28,0x28,0x00,0x00,0x00,0x00, // char 0x3D
+        0x00,0x44,0x28,0x10,0x00,0x00,0x00,0x00, // char 0x3E
+        0x00,0x54,0x14,0x08,0x00,0x00,0x00,0x00, // char 0x3F
+        0x38,0x44,0x54,0x54,0x08,0x00,0x00,0x00, // char 0x40
+        0x78,0x14,0x14,0x78,0x00,0x00,0x00,0x00,
+        0x7c,0x54,0x54,0x28,0x00,0x00,0x00,0x00,
+        0x38,0x44,0x44,0x44,0x00,0x00,0x00,0x00,
+        0x7c,0x44,0x44,0x38,0x00,0x00,0x00,0x00,
+        0x7c,0x54,0x54,0x44,0x00,0x00,0x00,0x00,
+        0x7c,0x14,0x14,0x04,0x00,0x00,0x00,0x00,
+        0x38,0x44,0x44,0x68,0x00,0x00,0x00,0x00,
+        0x7c,0x10,0x10,0x7c,0x00,0x00,0x00,0x00,
+        0x00,0x44,0x7c,0x44,0x00,0x00,0x00,0x00,
+        0x30,0x40,0x40,0x3c,0x00,0x00,0x00,0x00,
+        0x7c,0x10,0x28,0x44,0x00,0x00,0x00,0x00,
+        0x7c,0x40,0x40,0x40,0x00,0x00,0x00,0x00,
+        0x7c,0x10,0x10,0x7c,0x00,0x00,0x00,0x00,
+        0x7c,0x08,0x10,0x7c,0x00,0x00,0x00,0x00,
+        0x38,0x44,0x44,0x38,0x00,0x00,0x00,0x00,
+        0x7c,0x14,0x14,0x08,0x00,0x00,0x00,0x00,
+        0x38,0x44,0x44,0xb8,0x00,0x00,0x00,0x00,
+        0x7c,0x14,0x14,0x68,0x00,0x00,0x00,0x00,
+        0x48,0x54,0x54,0x24,0x00,0x00,0x00,0x00,
+        0x04,0x04,0x7c,0x04,0x04,0x00,0x00,0x00,
+        0x3c,0x40,0x40,0x3c,0x00,0x00,0x00,0x00,
+        0x1c,0x60,0x60,0x1c,0x00,0x00,0x00,0x00,
+        0x1c,0x60,0x18,0x60,0x1c,0x00,0x00,0x00,
+        0x4c,0x30,0x10,0x6c,0x00,0x00,0x00,0x00,
+        0x00,0x1c,0x60,0x1c,0x00,0x00,0x00,0x00,
+        0x64,0x54,0x4c,0x44,0x00,0x00,0x00,0x00,
+        0x00,0x7c,0x44,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x0c,0x30,0x40,0x00,0x00,0x00,0x00,
+        0x00,0x44,0x7c,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x08,0x04,0x08,0x00,0x00,0x00,0x00,
+        0x80,0x80,0x80,0x80,0x80,0x00,0x00,0x00,
+        0x00,0x04,0x08,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x68,0x28,0x70,0x00,0x00,0x00,0x00,
+        0x7e,0x48,0x48,0x30,0x00,0x00,0x00,0x00,
+        0x00,0x30,0x48,0x48,0x00,0x00,0x00,0x00,
+        0x30,0x48,0x48,0x7c,0x00,0x00,0x00,0x00,
+        0x30,0x58,0x58,0x50,0x00,0x00,0x00,0x00,
+        0x10,0x78,0x14,0x04,0x00,0x00,0x00,0x00,
+        0x10,0xa8,0xa8,0x78,0x00,0x00,0x00,0x00,
+        0x7c,0x08,0x08,0x70,0x00,0x00,0x00,0x00,
+        0x00,0x48,0x7a,0x40,0x00,0x00,0x00,0x00,
+        0x00,0x80,0x80,0x7a,0x00,0x00,0x00,0x00,
+        0x7c,0x10,0x28,0x40,0x00,0x00,0x00,0x00,
+        0x00,0x42,0x7e,0x40,0x00,0x00,0x00,0x00,
+        0x78,0x10,0x10,0x78,0x00,0x00,0x00,0x00,
+        0x78,0x08,0x08,0x70,0x00,0x00,0x00,0x00,
+        0x30,0x48,0x48,0x30,0x00,0x00,0x00,0x00,
+        0xf8,0x48,0x48,0x30,0x00,0x00,0x00,0x00,
+        0x30,0x48,0x48,0xf8,0x00,0x00,0x00,0x00,
+        0x00,0x78,0x10,0x08,0x00,0x00,0x00,0x00,
+        0x50,0x58,0x68,0x28,0x00,0x00,0x00,0x00,
+        0x08,0x3c,0x48,0x48,0x00,0x00,0x00,0x00,
+        0x38,0x40,0x40,0x78,0x00,0x00,0x00,0x00,
+        0x18,0x60,0x60,0x18,0x00,0x00,0x00,0x00,
+        0x78,0x20,0x20,0x78,0x00,0x00,0x00,0x00,
+        0x48,0x30,0x30,0x48,0x00,0x00,0x00,0x00,
+        0x18,0xa0,0xa0,0x78,0x00,0x00,0x00,0x00,
+        0x48,0x68,0x58,0x48,0x00,0x00,0x00,0x00,
+        0x00,0x18,0x24,0x42,0x00,0x00,0x00,0x00,
+        0x00,0x00,0x7e,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x42,0x24,0x18,0x00,0x00,0x00,0x00,
+        0x10,0x08,0x10,0x08,0x00,0x00,0x00,0x00,
+        0x60,0x50,0x48,0x50,0x60,0x00,0x00,0x00,
+        0x38,0x44,0xc4,0x44,0x00,0x00,0x00,0x00,
+        0x38,0x42,0x40,0x7a,0x00,0x00,0x00,0x00,
+        0x30,0x58,0x5a,0x51,0x00,0x00,0x00,0x00,
+        0x28,0x4a,0x31,0x42,0x00,0x00,0x00,0x00,
+        0x48,0x2a,0x70,0x42,0x00,0x00,0x00,0x00,
+        0x48,0x29,0x72,0x40,0x00,0x00,0x00,0x00,
+        0x48,0x28,0x72,0x40,0x00,0x00,0x00,0x00,
+        0x00,0x30,0xc8,0x48,0x00,0x00,0x00,0x00,
+        0x30,0x5a,0x59,0x52,0x00,0x00,0x00,0x00,
+        0x30,0x5a,0x58,0x52,0x00,0x00,0x00,0x00,
+        0x30,0x59,0x5a,0x50,0x00,0x00,0x00,0x00,
+        0x00,0x4a,0x78,0x42,0x00,0x00,0x00,0x00,
+        0x00,0x4a,0x79,0x42,0x00,0x00,0x00,0x00,
+        0x00,0x49,0x7a,0x40,0x00,0x00,0x00,0x00,
+        0x79,0x14,0x15,0x78,0x00,0x00,0x00,0x00,
+        0x78,0x14,0x15,0x78,0x00,0x00,0x00,0x00,
+        0x7c,0x54,0x56,0x45,0x00,0x00,0x00,0x00,
+        0x68,0x38,0x70,0x58,0x58,0x00,0x00,0x00,
+        0x78,0x14,0x7c,0x54,0x00,0x00,0x00,0x00,
+        0x30,0x4a,0x49,0x32,0x00,0x00,0x00,0x00,
+        0x30,0x4a,0x48,0x32,0x00,0x00,0x00,0x00,
+        0x30,0x49,0x4a,0x30,0x00,0x00,0x00,0x00,
+        0x38,0x42,0x41,0x7a,0x00,0x00,0x00,0x00,
+        0x38,0x41,0x42,0x78,0x00,0x00,0x00,0x00,
+        0x18,0xa2,0xa0,0x7a,0x00,0x00,0x00,0x00,
+        0x30,0x4a,0x48,0x32,0x00,0x00,0x00,0x00,
+        0x3c,0x41,0x40,0x3d,0x00,0x00,0x00,0x00,
+        0x30,0x48,0xcc,0x48,0x00,0x00,0x00,0x00,
+        0x50,0x7c,0x52,0x46,0x00,0x00,0x00,0x00,
+        0x02,0x2e,0x70,0x2e,0x02,0x00,0x00,0x00,
+        0x7e,0x12,0x1c,0x38,0x50,0x00,0x00,0x00,
+        0x90,0x7c,0x12,0x12,0x00,0x00,0x00,0x00,
+        0x48,0x2a,0x71,0x40,0x00,0x00,0x00,0x00,
+        0x00,0x48,0x7a,0x41,0x00,0x00,0x00,0x00,
+        0x30,0x48,0x4a,0x31,0x00,0x00,0x00,0x00,
+        0x38,0x40,0x42,0x79,0x00,0x00,0x00,0x00,
+        0x7a,0x09,0x0a,0x71,0x00,0x00,0x00,0x00,
+        0x7e,0x19,0x22,0x7d,0x00,0x00,0x00,0x00,
+        0x00,0x24,0x2a,0x2c,0x00,0x00,0x00,0x00,
+        0x00,0x24,0x2a,0x24,0x00,0x00,0x00,0x00,
+        0x20,0x50,0x4a,0x20,0x00,0x00,0x00,0x00,
+        0x60,0x20,0x20,0x20,0x20,0x00,0x00,0x00,
+        0x20,0x20,0x20,0x20,0x60,0x00,0x00,0x00,
+        0x2e,0x10,0x48,0x54,0x70,0x00,0x00,0x00,
+        0x2e,0x10,0x48,0x64,0xf2,0x00,0x00,0x00,
+        0x00,0x20,0x7a,0x20,0x00,0x00,0x00,0x00,
+        0x20,0x50,0x20,0x50,0x00,0x00,0x00,0x00,
+        0x50,0x20,0x50,0x20,0x00,0x00,0x00,0x00,
+        0x55,0xaa,0x55,0xaa,0x55,0x00,0x00,0x00,
+        0x55,0xbb,0x55,0xee,0x55,0x00,0x00,0x00,
+        0x55,0xff,0xaa,0xff,0x55,0x00,0x00,0x00,
+        0x00,0x00,0xff,0x00,0x00,0x00,0x00,0x00,
+        0x08,0x08,0xff,0x00,0x00,0x00,0x00,0x00,
+        0x14,0x14,0xff,0x00,0x00,0x00,0x00,0x00,
+        0x08,0xff,0x00,0xff,0x00,0x00,0x00,0x00,
+        0x08,0xf8,0x08,0xf8,0x00,0x00,0x00,0x00,
+        0x14,0x14,0xfc,0x00,0x00,0x00,0x00,0x00,
+        0x14,0xf7,0x00,0xff,0x00,0x00,0x00,0x00,
+        0x00,0xff,0x00,0xff,0x00,0x00,0x00,0x00,
+        0x14,0xf4,0x04,0xfc,0x00,0x00,0x00,0x00,
+        0x14,0x17,0x10,0x1f,0x00,0x00,0x00,0x00,
+        0x08,0x0f,0x08,0x0f,0x00,0x00,0x00,0x00,
+        0x14,0x14,0x1f,0x00,0x00,0x00,0x00,0x00,
+        0x08,0x08,0xf8,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x00,0x0f,0x08,0x08,0x00,0x00,0x00,
+        0x08,0x08,0x0f,0x08,0x08,0x00,0x00,0x00,
+        0x08,0x08,0xf8,0x08,0x08,0x00,0x00,0x00,
+        0x00,0x00,0xff,0x08,0x08,0x00,0x00,0x00,
+        0x08,0x08,0x08,0x08,0x08,0x00,0x00,0x00,
+        0x08,0x08,0xff,0x08,0x08,0x00,0x00,0x00,
+        0x00,0x00,0xff,0x14,0x14,0x00,0x00,0x00,
+        0x00,0xff,0x00,0xff,0x08,0x00,0x00,0x00,
+        0x00,0x1f,0x10,0x17,0x14,0x00,0x00,0x00,
+        0x00,0xfc,0x04,0xf4,0x14,0x00,0x00,0x00,
+        0x14,0x17,0x10,0x17,0x14,0x00,0x00,0x00,
+        0x14,0xf4,0x04,0xf4,0x14,0x00,0x00,0x00,
+        0x00,0xff,0x00,0xf7,0x14,0x00,0x00,0x00,
+        0x14,0x14,0x14,0x14,0x14,0x00,0x00,0x00,
+        0x14,0xf7,0x00,0xf7,0x14,0x00,0x00,0x00,
+        0x14,0x14,0x17,0x14,0x14,0x00,0x00,0x00,
+        0x08,0x0f,0x08,0x0f,0x08,0x00,0x00,0x00,
+        0x14,0x14,0xf4,0x14,0x14,0x00,0x00,0x00,
+        0x08,0xf8,0x08,0xf8,0x08,0x00,0x00,0x00,
+        0x00,0x0f,0x08,0x0f,0x08,0x00,0x00,0x00,
+        0x00,0x00,0x1f,0x14,0x14,0x00,0x00,0x00,
+        0x00,0x00,0xfc,0x14,0x14,0x00,0x00,0x00,
+        0x00,0xf8,0x08,0xf8,0x08,0x00,0x00,0x00,
+        0x08,0xff,0x08,0xff,0x08,0x00,0x00,0x00,
+        0x14,0x14,0xff,0x14,0x14,0x00,0x00,0x00,
+        0x08,0x08,0x0f,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x00,0xf8,0x08,0x08,0x00,0x00,0x00,
+        0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,
+        0xf0,0xf0,0xf0,0xf0,0xf0,0x00,0x00,0x00,
+        0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0xff,0xff,0x00,0x00,0x00,
+        0x0f,0x0f,0x0f,0x0f,0x0f,0x00,0x00,0x00,
+        0x30,0x48,0x48,0x30,0x48,0x00,0x00,0x00,
+        0xfc,0x4a,0x4a,0x3c,0x00,0x00,0x00,0x00,
+        0x00,0x7e,0x02,0x02,0x00,0x00,0x00,0x00,
+        0x00,0x7c,0x04,0x7c,0x00,0x00,0x00,0x00,
+        0x62,0x56,0x4a,0x42,0x66,0x00,0x00,0x00,
+        0x38,0x44,0x44,0x3c,0x04,0x00,0x00,0x00,
+        0xf8,0x40,0x40,0x38,0x40,0x00,0x00,0x00,
+        0x02,0x04,0x78,0x06,0x02,0x00,0x00,0x00,
+        0x10,0x28,0xee,0x28,0x10,0x00,0x00,0x00,
+        0x38,0x54,0x54,0x54,0x38,0x00,0x00,0x00,
+        0x58,0x64,0x04,0x64,0x58,0x00,0x00,0x00,
+        0x32,0x4d,0x49,0x30,0x00,0x00,0x00,0x00,
+        0x30,0x48,0x78,0x48,0x30,0x00,0x00,0x00,
+        0x50,0x28,0x58,0x48,0x34,0x00,0x00,0x00,
+        0x00,0x3c,0x4a,0x4a,0x00,0x00,0x00,0x00,
+        0x7c,0x02,0x02,0x7c,0x00,0x00,0x00,0x00,
+        0x54,0x54,0x54,0x54,0x00,0x00,0x00,0x00,
+        0x48,0x48,0x5c,0x48,0x48,0x00,0x00,0x00,
+        0x40,0x62,0x54,0x48,0x00,0x00,0x00,0x00,
+        0x00,0x48,0x54,0x62,0x00,0x00,0x00,0x00,
+        0x00,0x00,0xf8,0x04,0x0c,0x00,0x00,0x00,
+        0x30,0x20,0x1f,0x00,0x00,0x00,0x00,0x00,
+        0x10,0x54,0x54,0x10,0x00,0x00,0x00,0x00,
+        0x48,0x24,0x48,0x24,0x00,0x00,0x00,0x00,
+        0x00,0x08,0x14,0x08,0x00,0x00,0x00,0x00,
+        0x00,0x18,0x18,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x00,0x08,0x00,0x00,0x00,0x00,0x00,
+        0x20,0x40,0x30,0x0c,0x04,0x00,0x00,0x00,
+        0x00,0x0e,0x02,0x0c,0x00,0x00,0x00,0x00,
+        0x00,0x12,0x1a,0x14,0x00,0x00,0x00,0x00,
+        0x00,0x38,0x38,0x38,0x00,0x00,0x00,0x00,
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF
+};
 
     // Endpoints to restrict charcater set
     uint8_t char_set_start = 0x00;
@@ -3224,7 +681,7 @@ const uint8_t* SSD1306::ASCIImap(char c) {
         return nullptr;
     }
     else {
-        int char_index = (c - char_set_start) * 6;
+        int char_index = (c - char_set_start) * 8;
         return &font_bitmap_6x8[char_index];
     }
 }

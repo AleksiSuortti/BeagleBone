@@ -10,6 +10,10 @@
 #include <linux/i2c-dev.h>
 #include <cstring>
 #include <string>
+#include <bitset>
+#include <thread>
+#include <chrono>
+#include <cmath>
 
 #define I2C_SLAVE_ADDR 0x3C
 
@@ -41,48 +45,75 @@
 #define CONTRAST_LEVEL 0xCF
 #define CONFIG_PRE_CH_PRD 0xF1
 #define PX_TURNOFF_V 0x40
+#define BLACK 0
+#define WHITE 1
 
 class SSD1306 {
     public:
 
-        /*constructor that accepts the i2c bus number of the beaglebone eg. I2C-1
-          there is an i2c-0 bus but that is typically reserved for HDMI
-        */
         SSD1306(const int bus);
 
-        // Desctructor to close the file descriptor
         ~SSD1306();
 
-        // Initialize the SSD1306 display
         bool begin();
 
-        // Give the display initial configuration
         void initDisplay();
         
-        // Clear the display
+        void reset();
+
+        void setDisplayState(bool is_on);
+
+        void clearBuffer();
+
         void clearDisplay();
 
+        // This is for debugging use
         void pageTest();
 
-        // Sets the cursor position for the nect write operation
-        void setCursor(uint8_t col, uint8_t page);
+        int setCursor(uint8_t col, uint8_t page);
 
-        // Sends a sequence of commands to the SSD1306
-        void sendCommand(const uint8_t *commands, size_t len);
+        int sendCommand(const uint8_t *commands, size_t len);
 
-        // Method to draw text on the display
         void drawText(const std::string& text, int x, int y);
 
-        // Method for drawing characters
         void drawChar(char c, int x, int y);
 
-        // Returns a pointer to "6x8" map for an ASCII character
-        const uint8_t* ASCIImap(char c);
+        void draw_8(uint8_t* bitmap, size_t width, int x, int y);
+
+        void drawPixel(int x, int y, int color);
+
+        void drawLine(int x0, int y0, int x1, int y1, int width, int color);
+
+        void drawHrzLine(int x0, int x1, int y, int color);
+
+        void drawVertLine(int y0, int y1, int x, int color);
+
+        void drawRectangle(int x0, int y0, int x1, int y1, int color);
+
+        void drawTriangle(int x0, int y0, int x1, int y1, int x2, int y2, int width, int color);
+
+        void drawEqTriangle(int tipX, int tipY, int height, int width, int color);
+
+        void draw_64(uint64_t* bitmap);
+
+        void startHorizontalScroll(int startPage, int endPage, int direction, int speed);
+
+        // Diagonal scrolling wip does not want to cooperate
+        void startDiagonalRightScrl(int startPage, int endPage);
+
+        void startDiagonalLeftScrl(int startPage, int endPage);
+
+        void stopScroll();
+
+        void renderDisplay();
+
+        uint8_t* ASCIImap(char c);
 
     private:
-        const int bus; // The i2c bus number
-        int file;
-        uint8_t cursor[3];      // File descriptor for i2c communication
+        const int bus;                // The i2c bus number
+        int file;               // File descriptor for i2c communication
+        uint8_t cursor[3];            // Page cursor
+        uint64_t frameBuffer[128];    // Buffer for current display frame
 };
 
 #endif // SSD1306_H
