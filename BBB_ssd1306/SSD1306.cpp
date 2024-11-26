@@ -9,8 +9,8 @@ SSD1306::SSD1306(const int bus) : bus(bus), file(-1), cursor{0,0,0} {}
 
 // Destructor to close the file descriptor if open
 SSD1306::~SSD1306() {
-    if (file >= 0) {
-        close(file);
+    if (this->file >= 0) {
+        close(this->file);
     }
 }
 
@@ -20,9 +20,9 @@ bool SSD1306::begin() {
     // Open the device file of specified i2c bus
     char file_path[20];
     snprintf(file_path, 19, "/dev/i2c-%d", bus);
-    file = open(file_path, O_RDWR);
+    this->file = open(file_path, O_RDWR);
 
-    if(file < 0) {
+    if(this->file < 0) {
         std::cerr << "Failed to open the i2c bus" << std::endl;
         return false;
     }
@@ -30,14 +30,13 @@ bool SSD1306::begin() {
     std::cout << "File opened: " << file << std::endl;
     
     // Tell i2c driver the file descriptor is used to communicate with the device at I2C_SLAVE_ADDR
-    if(ioctl(file, I2C_SLAVE, I2C_SLAVE_ADDR) < 0) {
+    if(ioctl(this->file, I2C_SLAVE, I2C_SLAVE_ADDR) < 0) {
     	std::cerr << "Failed to open /dev/i2c-" << bus << std::endl;
-	close(file);
+	close(this->file);
     }
 
     initDisplay();
-    clearBuffer();
-    renderDisplay();
+    clearDisplay();
     return true;
 }
 
@@ -76,8 +75,7 @@ void SSD1306::setDisplayState(bool is_on) {
 
 void SSD1306::reset() {
     initDisplay();
-    clearBuffer();
-    renderDisplay();
+    clearDisplay();
 }
 
 void SSD1306::clearBuffer() {
@@ -85,42 +83,18 @@ void SSD1306::clearBuffer() {
     std::memset(frameBuffer, 0x00, sizeof(frameBuffer));
 }
 
-// Clears the display by writing zeroes to all pixels
 void SSD1306::clearDisplay() {
 
     clearBuffer();
-    renderDisplay();
-}
-
-// This is for debugging use
-void SSD1306::pageTest() {
-  
-    uint8_t buffer[129];   // control byte + 128 bytes reserved for data
-    buffer[0] = 0x40;      // Control byte for data
-    std::memset(buffer + 1, 0, 129);    // Clear screen with zeros
-
-    for(int i = 0; i < 8; i++) {
-        if(i % 2 == 0) {
-            std::cout << "Debug 0 (Page " << i << ")" << std::endl;
-            std::memset(buffer + 1, 0x00, 128);
-        }
-        else {
-            std::cout << "Debug 1 (Page " << i << ")" << std::endl;
-            std::memset(buffer + 1, 0xFF, 128);
-        }
-        setCursor(0, i);
-        int test_bytwes_wr = write(file, buffer, sizeof(buffer));
-
-        std::cout << "pagetest bytes written: " << test_bytwes_wr << std::endl;
-    }
+    renderDisplay(0,7);
 }
 
 // Sets the cursor position for the next write operation
 int SSD1306::setCursor(uint8_t col, uint8_t page) {
 
-        cursor[0] = static_cast<uint8_t>(0xB0 + page);                 // Set page start address
-        cursor[1] = static_cast<uint8_t>(0x00 + (col & 0x0F));          // Lower column start address
-        cursor[2] = static_cast<uint8_t>(0x10 + ((col >> 4 ) & 0x0F));  // Higher column start addres
+        this->cursor[0] = static_cast<uint8_t>(0xB0 + page);                 // Set page start address
+        this->cursor[1] = static_cast<uint8_t>(0x00 + (col & 0x0F));          // Lower column start address
+        this->cursor[2] = static_cast<uint8_t>(0x10 + ((col >> 4 ) & 0x0F));  // Higher column start addres
     
     return write(file, cursor, sizeof(cursor));
 }
@@ -143,6 +117,11 @@ int SSD1306::sendCommand(const uint8_t *commands, size_t len) {
         return errno;
     }
     return debug;
+}
+
+void SSD1306::inverseDisplay(bool is_inverse) {
+    const uint8_t command = is_inverse ?  SET_DISP_INVERSE : SET_DISP_NORM;
+    sendCommand(&command, 1);
 }
 
 void SSD1306::drawText(const std::string& text, int x, int y) {
@@ -191,7 +170,7 @@ void SSD1306::drawPixel(int x, int y, int color) {
     if((x < 0 || x > 127) || (y < 0 || y > 63)) {
         return;
     }
-    color ? (frameBuffer[x] |= (1ULL << y)) : (frameBuffer[x] &= ~(1ULL << y));
+    color ? (this->frameBuffer[x] |= (1ULL << y)) : (this->frameBuffer[x] &= ~(1ULL << y));
 }
 
 // Usign Bresenham's line algorithm
@@ -281,9 +260,9 @@ drawLine(x1, y1, x2, y2, width, color);
 void SSD1306::drawEqTriangle(int tipX, int tipY, int height, int width, int color) {
 
     int left_x = tipX - floor((1732*height/2000));
-    std::cout << left_x << std::endl;
+
     int right_x = tipX + floor((1732*height/2000));
-    std::cout << right_x << std::endl;
+
     int base_y = tipY + height;
 
     drawLine(tipX, tipY, left_x, base_y, width, color);
@@ -291,11 +270,66 @@ void SSD1306::drawEqTriangle(int tipX, int tipY, int height, int width, int colo
     drawLine(left_x, base_y, right_x, base_y, width, color);
 }
 
-void SSD1306::draw_64(uint64_t* bitmap) {
-    std::memcpy(frameBuffer, bitmap, 1024);
+void SSD1306::drawCircle(int x, int y, int radius, int color) {
+
+    float dp;
+    int x1,y1;
+    x1 = 0;
+    y1 = radius;
+    dp = 3 - 2*radius;
+    while(x1<=y1)
+    {
+        if(dp<=0)
+            dp += (4 * x1) + 6;
+        else
+        {
+            dp += 4*(x1-y1)+10;
+            y1--;
+        }
+        x1++;
+        drawPixel(x1+x, y1+y, color);
+        drawPixel(x1+x, y-y1, color);
+        drawPixel(x-x1, y1+y, color);
+        drawPixel(x-x1, y-y1, color);
+        drawPixel(x+y1, y+x1, color);
+        drawPixel(x+y1, y-x1, color);
+        drawPixel(x-y1, y+x1, color);
+        drawPixel(x-y1, y-x1, color);
+    }
 }
 
-void SSD1306::renderDisplay() {
+void SSD1306::fillCircle(int x, int y, int radius, int color) {
+    int dp;
+    int x1 = 0;
+    int y1 = radius;
+    dp = 3 - 2 * radius;
+
+    while (x1 <= y1) {
+        // Fill spans directly
+        for (int i = x - x1; i <= x + x1; i++) {
+            drawPixel(i, y - y1, color); // Top span
+            drawPixel(i, y + y1, color); // Bottom span
+        }
+        for (int i = x - y1; i <= x + y1; i++) {
+            drawPixel(i, y - x1, color); // Left span
+            drawPixel(i, y + x1, color); // Right span
+        }
+
+        if (dp <= 0) {
+            dp += (4 * x1) + 6;
+        } else {
+            dp += 4 * (x1 - y1) + 10;
+            y1--;
+        }
+        x1++;
+    }
+}
+
+void SSD1306::draw_64(uint64_t* bitmap) {
+    std::memcpy(this->frameBuffer, bitmap, 1024);
+}
+
+void SSD1306::renderDisplay(int startPage, int endPage) {
 
     uint8_t pageBuffer[129];   // Page buffer with control byte for data
     pageBuffer[0] = 0x40;
@@ -303,14 +337,14 @@ void SSD1306::renderDisplay() {
     for(int page = 0; page < 8; page++) {
         for(int col = 0; col < 128; col++) {
 
-            pageBuffer[col + 1] = ((frameBuffer[col]) >> (page*8)) & 0xFF;
+            pageBuffer[col + 1] = ((this->frameBuffer[col]) >> (page*8)) & 0xFF;
         }
         
         if(setCursor(0, page) < 3) {
             std::cout << "Error setting cursor" << std::endl;
         } 
         else {
-            if(write(file, pageBuffer, sizeof(pageBuffer)) != sizeof(pageBuffer)) {
+            if(write(this->file, pageBuffer, sizeof(pageBuffer)) != sizeof(pageBuffer)) {
                 std::cout << "There was an error writing page" << std::endl;
                 break;
             }

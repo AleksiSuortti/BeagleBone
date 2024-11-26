@@ -34,6 +34,7 @@
 #define DISP_FULL_PX_ON 0xA4
 #define SET_DISP_NORM 0xA6
 #define DISP_ON 0xAF
+#define SET_DISP_INVERSE 0xA7
 
 // Display configuration parameters
 #define DISPCLK_DIV 0x80
@@ -67,12 +68,11 @@ class SSD1306 {
 
         void clearDisplay();
 
-        // This is for debugging use
-        void pageTest();
-
         int setCursor(uint8_t col, uint8_t page);
 
         int sendCommand(const uint8_t *commands, size_t len);
+
+        void inverseDisplay(bool is_inverse);
 
         void drawText(const std::string& text, int x, int y);
 
@@ -90,10 +90,16 @@ class SSD1306 {
 
         void drawRectangle(int x0, int y0, int x1, int y1, int color);
 
+        void fillRectangle(int x0, int y0, int x1, int y1, int color);
+
         void drawTriangle(int x0, int y0, int x1, int y1, int x2, int y2, int width, int color);
 
         void drawEqTriangle(int tipX, int tipY, int height, int width, int color);
 
+        void drawCircle(int center_x, int center_y, int radius, int color);
+        
+        void fillCircle(int center_x, int center_y, int radius, int color);
+        
         void draw_64(uint64_t* bitmap);
 
         void startHorizontalScroll(int startPage, int endPage, int direction, int speed);
@@ -105,7 +111,7 @@ class SSD1306 {
 
         void stopScroll();
 
-        void renderDisplay();
+        void renderDisplay(int startPage, int endPage);
 
         uint8_t* ASCIImap(char c);
 
